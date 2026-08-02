@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from unittest import mock
 from unittest.mock import patch
 
 import pytest
@@ -258,3 +259,26 @@ def test_stage_rollback_undoes_mutation_from_failing_stage_only() -> None:
     # resolve_integrations mutations persist (it succeeded).
     assert "resolved_integrations" in state
     # plan_actions raised before producing output, so no plan_actions key to restore.
+
+
+def test_extraction_failed_flag_set_on_llm_error(monkeypatch: Any) -> None:
+    """When the LLM call inside extract_alert raises, extraction_failed=True
+    is added to the returned state update so downstream stages can adjust."""
+    from tools.investigation.stages.intake.node import extract_alert
+    from tools.investigation.state_factory import make_initial_state
+
+    state = make_initial_state(raw_alert="ERROR: disk full on node-3")
+    mock_chain = mock.MagicMock()
+    mock_chain.invoke.side_effect = RuntimeError("LLM unavailable")
+    mock_chain.with_config.return_value = mock_chain
+    mock_llm = mock.MagicMock()
+    mock_llm.with_structured_output.return_value = mock_chain
+
+    monkeypatch.setattr(
+        "tools.investigation.stages.intake.node.get_llm",
+        lambda _role: mock_llm,
+    )
+
+    result = extract_alert(state)
+    assert result.get("extraction_failed") is True
+    assert result.get("is_noise") is False

@@ -100,7 +100,10 @@ def extract_alert(state: InvestigationState) -> dict[str, Any]:
     _render_alert_summary(details, raw_alert)
 
     tracker.complete("extract_alert", fields_updated=_EXTRACTED_STATE_FIELDS)
-    return _build_alert_updates(state, raw_alert, details)
+    updates = _build_alert_updates(state, raw_alert, details)
+    if getattr(details, "extraction_failed", False):
+        updates["extraction_failed"] = True
+    return updates
 
 
 def _log_raw_alert(raw_alert: Any) -> None:
@@ -174,8 +177,10 @@ def _extract_alert_details(state: InvestigationState) -> AlertDetails:
         )
         return details
     except Exception as err:
+        logger.warning("LLM alert extraction failed, using fallback: %s", err)
         debug_print(f"LLM alert extraction failed, using fallback: {err}")
-        return fallback_details(state, raw_alert)
+        details = fallback_details(state, raw_alert)
+        return AlertDetails(extraction_failed=True, **details.model_dump())
 
 
 def _handle_noise_reaction(state: InvestigationState) -> None:

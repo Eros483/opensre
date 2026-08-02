@@ -126,9 +126,9 @@ def needs_full_json_prompt(raw_alert: dict[str, Any]) -> bool:
 def fallback_details(state: Mapping[str, Any], raw_alert: Any) -> AlertDetails:
     """Best-effort field extraction when the LLM path is unavailable.
 
-    Defaults to noise when LLM extraction fails — the fallback cannot reliably
-    distinguish a casual message from a real alert, and running a full
-    investigation on a failed extraction wastes resources.
+    Returns ``is_noise=False`` — when the LLM can't classify, the safe
+    default is to investigate. Callers should flag the degraded state so
+    downstream stages can adjust confidence accordingly.
     """
     alert_name = state.get("alert_name", "unknown")
     severity = state.get("severity", "unknown")
@@ -153,7 +153,7 @@ def fallback_details(state: Mapping[str, Any], raw_alert: Any) -> AlertDetails:
         )
 
     return AlertDetails(
-        is_noise=True,
+        is_noise=False,
         alert_name=alert_name or "unknown",
         severity=severity or "unknown",
     )
