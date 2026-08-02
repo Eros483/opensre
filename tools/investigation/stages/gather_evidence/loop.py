@@ -148,6 +148,55 @@ def duplicate_call_result(tool_call: ToolCall, cached: CachedToolResult) -> dict
     }
 
 
+def degraded_investigation_from_tool_failure(
+    err: BaseException,
+    *,
+    tracker: Any,
+    _emit: Callable[[str, dict[str, Any]], None],
+    evidence: dict[str, Any],
+    evidence_entries: list[EvidenceEntry],
+    messages: list[dict[str, Any]],
+    executed_hypotheses: list[dict[str, Any]],
+    tool_context: dict[str, Any],
+    investigation_loop_count: int = 0,
+) -> dict[str, Any]:
+    """Return partial investigation state when a tool execution raises."""
+    tracker.error(
+        "investigation_agent",
+        message=f"Tool execution failed: {type(err).__name__}",
+    )
+    error_msg = f"Tool execution error: {type(err).__name__}"
+    _emit(
+        "agent_end",
+        {
+            "root_cause": error_msg,
+            "validity_score": 0.0,
+            "root_cause_category": "tool_execution_error",
+        },
+    )
+    updates: dict[str, Any] = {
+        "root_cause": error_msg,
+        "root_cause_category": "tool_execution_error",
+        "causal_chain": [f"Tool execution failed: {err!s}"],
+        "validated_claims": [],
+        "non_validated_claims": [],
+        "remediation_steps": [
+            "A tool raised an unexpected error during the investigation. "
+            "Check tool logs for details and verify integration connectivity."
+        ],
+        "validity_score": 0.0,
+        "investigation_recommendations": [],
+        "evidence": evidence,
+        "evidence_entries": [e.model_dump() for e in evidence_entries],
+        "agent_messages": messages,
+        "executed_hypotheses": executed_hypotheses,
+        "investigation_loop_count": max(0, int(investigation_loop_count)),
+        "investigation_iteration_cap": MAX_INVESTIGATION_LOOPS,
+    }
+    updates.update(tool_context)
+    return updates
+
+
 def degraded_investigation_from_llm_failure(
     failure: LLMInvokeFailure,
     *,

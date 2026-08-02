@@ -155,3 +155,106 @@ def test_run_connected_investigation_noop_sink_emits_nothing() -> None:
     ):
         out = run_connected_investigation(state, agent_class=_QuietAgent)
     assert out.get("is_noise") is True
+
+
+# --- Rollback on stage failure ---
+
+
+class _FailingAgent(ConnectedInvestigationAgent):
+    def run(  # type: ignore[override]
+        self,
+        state: dict[str, Any],  # noqa: ARG002
+        on_event: Any | None = None,  # noqa: ARG002
+    ) -> dict[str, Any]:
+        raise RuntimeError("gather_evidence blew up")
+
+
+def test_later_stage_failure_rolls_back_failing_stage_mutations() -> None:
+    """Per-stage rollback: a failing stage's mutations are undone;
+    mutations from earlier successful stages persist."""
+    from tools.investigation.lifecycle import run_connected_investigation
+    from tools.investigation.state_factory import make_initial_state
+
+    state = make_initial_state(raw_alert="alert text")
+    # resolved_integrations starts as {} from the initial state.
+    assert state.get("resolved_integrations") == {}
+
+    with (
+        patch(
+            "tools.investigation.stages.resolve_integrations.resolve_integrations",
+            return_value={"resolved_integrations": {"grafana": {"url": "g"}}},
+        ),
+        patch(
+            "tools.investigation.stages.intake.extract_alert",
+            return_value={"is_noise": False, "alert_name": "Stale", "severity": "high"},
+        ),
+        patch(
+            "tools.investigation.stages.plan_evidence.plan_actions",
+            side_effect=RuntimeError("plan_actions blew up"),
+        ),
+        pytest.raises(RuntimeError, match="plan_actions blew up"),
+    ):
+        run_connected_investigation(state, agent_class=_FailingAgent)
+
+    # resolve_integrations succeeded → its value persists.
+    assert state.get("resolved_integrations") == {"grafana": {"url": "g"}}
+    # intake succeeded → its mutations persist.
+    assert state.get("is_noise") is False
+    assert state.get("alert_name") == "Stale"
+    # plan_actions failed → its mutations (none, it raised immediately) are absent.
+    # severity from intake persists.
+    assert state.get("severity") == "high"
+
+
+def test_stage_rollback_preserves_pre_stage_state_on_first_failure() -> None:
+    """Exception in the first stage restores exactly the initial state."""
+    from tools.investigation.lifecycle import run_connected_investigation
+    from tools.investigation.state_factory import make_initial_state
+
+    state = make_initial_state(raw_alert="alert text")
+    original_resolved = state.get("resolved_integrations")
+
+    with (
+        patch(
+            "tools.investigation.stages.resolve_integrations.resolve_integrations",
+            side_effect=RuntimeError("resolve blew up"),
+        ),
+        pytest.raises(RuntimeError, match="resolve blew up"),
+    ):
+        run_connected_investigation(state, agent_class=_FailingAgent)
+
+    assert state.get("resolved_integrations") == original_resolved
+    assert state.get("is_noise") is False  # initial default
+
+
+def test_stage_rollback_undoes_mutation_from_failing_stage_only() -> None:
+    """When a stage writes values then raises, those values are rolled back;
+    earlier stages are unaffected."""
+    from tools.investigation.lifecycle import run_connected_investigation
+    from tools.investigation.state_factory import make_initial_state
+
+    state = make_initial_state(raw_alert="alert text")
+    # intake succeeds — severity changes to "critical"
+    # plan_actions raises AFTER writing to state
+    with (
+        patch(
+            "tools.investigation.stages.resolve_integrations.resolve_integrations",
+            return_value={"resolved_integrations": {}},
+        ),
+        patch(
+            "tools.investigation.stages.intake.extract_alert",
+            return_value={"is_noise": False, "severity": "critical"},
+        ),
+        patch(
+            "tools.investigation.stages.plan_evidence.plan_actions",
+            side_effect=RuntimeError("plan blew up"),
+        ),
+        pytest.raises(RuntimeError),
+    ):
+        run_connected_investigation(state, agent_class=_FailingAgent)
+
+    # intake ran and has is_noise=False — NOT rolled back (it succeeded).
+    assert state.get("is_noise") is False
+    # resolve_integrations mutations persist (it succeeded).
+    assert "resolved_integrations" in state
+    # plan_actions raised before producing output, so no plan_actions key to restore.

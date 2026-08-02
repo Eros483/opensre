@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -17,11 +18,21 @@ if TYPE_CHECKING:
 
 
 def _run_stage(name: str, stage: Callable[[AgentState], Any], state: AgentState) -> None:
-    """Merge one pipeline stage's updates into ``state`` under a stage trace span."""
+    """Merge one pipeline stage's updates into ``state`` under a stage trace span.
+
+    Snapshots state before execution so a partial mutation from a failing
+    stage is rolled back — later stages and callers see only pre-stage data.
+    """
     from platform.observability.trace.spans import stage_span
 
+    snapshot = copy.deepcopy(state)
     with stage_span(name):
-        apply_state_updates(state, stage(state))
+        try:
+            apply_state_updates(state, stage(state))
+        except Exception:
+            state.clear()
+            state.update(snapshot)
+            raise
 
 
 def run_connected_investigation(

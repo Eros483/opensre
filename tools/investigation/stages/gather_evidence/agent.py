@@ -39,6 +39,7 @@ from tools.investigation.stages.gather_evidence.incident_command import (
 from tools.investigation.stages.gather_evidence.loop import (
     InvestigationToolCallCache,
     degraded_investigation_from_llm_failure,
+    degraded_investigation_from_tool_failure,
     duplicate_call_result,
     tool_call_signature,
 )
@@ -321,13 +322,54 @@ class ConnectedInvestigationAgent(EventEmitterMixin, ToolFilterMixin):
                 }
             )
 
-            fresh_results = iter(execute_tools(fresh_calls, tools, resolved) if fresh_calls else [])
+            try:
+                fresh_results = iter(
+                    execute_tools(fresh_calls, tools, resolved) if fresh_calls else []
+                )
+            except Exception as err:
+                logger.warning(
+                    "[agent] execute_tools raised on iteration %d: %s",
+                    iteration,
+                    err,
+                    exc_info=True,
+                )
+                return degraded_investigation_from_tool_failure(
+                    err,
+                    tracker=self._tracker,
+                    _emit=self._emit,
+                    evidence=evidence,
+                    evidence_entries=evidence_entries,
+                    messages=messages,
+                    executed_hypotheses=executed_hypotheses,
+                    tool_context=tool_context,
+                    investigation_loop_count=loops_completed,
+                )
             results: list[Any] = []
             for tc, cached_entry in zip(response.tool_calls, cached_entries, strict=True):
                 if cached_entry is not None:
                     results.append(duplicate_call_result(tc, cached_entry))
                     continue
-                output = next(fresh_results)
+                try:
+                    output = next(fresh_results)
+                except Exception as err:
+                    logger.warning(
+                        "[agent] tool %s raised on iteration %d: %s",
+                        tc.name,
+                        iteration,
+                        err,
+                        exc_info=True,
+                    )
+                    return degraded_investigation_from_tool_failure(
+                        err,
+                        tracker=self._tracker,
+                        _emit=self._emit,
+                        evidence=evidence,
+                        evidence_entries=evidence_entries,
+                        messages=messages,
+                        executed_hypotheses=executed_hypotheses,
+                        tool_context=tool_context,
+                        investigation_loop_count=loops_completed,
+                    )
                 tool_call_cache.store(tool_call_signature(tc), output, loop_iteration=iteration)
                 results.append(output)
 
